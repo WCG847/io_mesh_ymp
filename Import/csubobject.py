@@ -18,5 +18,10 @@ class CSubObject(CSkinModel):
 			file.seek(paramPointer)
 			for j in range(paramCount):
 				params = []
-				verticesAffected, 
+				verticesAffected, boneIndicesCount, vertexPosOffset, vertexNormOffset, BoneIndex1, BoneIndex2, BoneIndex3 = unpack('<7I', file.read(7 * 4))
+				params.append((verticesAffected, boneIndicesCount, vertexPosOffset, vertexNormOffset, BoneIndex1, BoneIndex2, BoneIndex3))
+				cp = file.tell()
+				file.seek(vertexPosOffset)
+				for k in range(verticesAffected):
+
 
