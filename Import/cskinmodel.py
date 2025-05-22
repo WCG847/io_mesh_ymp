@@ -62,10 +62,11 @@ class CSkinModel:
 			matrix = Matrix.Translation(trans_vec) @ quat.to_matrix().to_4x4()
 
 			print(f"Bone: {name}, Matrix:\n{matrix}")
-			self.BoneEntries.append((name, translation, rotation, parentID, matrix))
 
-			self.YMP.seek(0x1C, 1)
-
+			self.YMP.seek(0xC, 1)
+			matrix_rows = [unpack('<4f', self.YMP.read(16)) for _ in range(4)]
+			restpose_matrix = Matrix(matrix_rows)
+			self.BoneEntries.append((name, translation, rotation, parentID, matrix,restpose_matrix))
 		self.YMP.seek(0x18)
 		ympTexCount = unpack('<I', self.YMP.read(4))[0]
 		self.YMP.seek(0x22)

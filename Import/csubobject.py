@@ -22,6 +22,24 @@ class CSubObject(CSkinModel):
 				params.append((verticesAffected, boneIndicesCount, vertexPosOffset, vertexNormOffset, BoneIndex1, BoneIndex2, BoneIndex3))
 				cp = file.tell()
 				file.seek(vertexPosOffset)
+				vertex_positions = []
 				for k in range(verticesAffected):
+					pos = Vector(unpack('<4f', file.read(16)))  # XYZW delta
+					weighted_pos = Vector((0.0, 0.0, 0.0))
+
+					bones = [BoneIndex1, BoneIndex2, BoneIndex3][:boneIndicesCount]
+					weights = [0.0] * boneIndicesCount  # need to get actual weights
+
+					for b_idx, bone_id in enumerate(bones):
+						bone_name, _, _, _, bone_matrix, restpose = self.BoneEntries[bone_id]
+						inv_bind = restpose.inverted()
+						final_matrix = bone_matrix @ inv_bind
+						weighted_pos += (final_matrix @ pos.to_3d()) * weights[b_idx]
+
+					vertex_positions.append(weighted_pos)
+			self.YMP.seek(STQPointer)
+			for l in range(STQCount):
+
+
 
 
