@@ -1,7 +1,6 @@
-from io import BytesIO
 from typing import BinaryIO
-from struct import unpack, pack
-from mathutils import Matrix, Vector, Quaternion
+from struct import unpack
+from mathutils import Matrix, Vector
 from cskinmodel import CSkinModel
 
 class CSubObject(CSkinModel):
