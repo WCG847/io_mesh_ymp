@@ -38,8 +38,64 @@ class CSubObject(CSkinModel):
 
 					vertex_positions.append(weighted_pos)
 			self.YMP.seek(STQPointer)
-			for l in range(STQCount):
+			for l in range(STQCount - 1, -1, -1):
+				st_data = unpack('<8f', file.read(32))  # 4 ST pairs
+				STGroupID, GroupInterpretation, BatchID, marker = unpack('<4I', file.read(16))
+
+				ST_Entries = [
+					(st_data[0], st_data[1]),
+					(st_data[2], st_data[3]),
+					(st_data[4], st_data[5]),
+				]
+
+				if GroupInterpretation == 7 and l > 1 and marker == 0:
+					st_data2 = unpack('<8f', file.read(32))
+					STGroupID, GroupInterpretation, BatchID, marker = unpack('<4I', file.read(16))
+					ST_Entries += [
+						(st_data2[0], st_data2[1]),
+						(st_data2[2], st_data2[3]),
+						(st_data2[4], st_data2[5]),
+					]
+
+				file.seek(0x60, 1)
+				groupCount, PS2Ram, faceCount = unpack('<3H', file.read(6))
+				startFaceGroup, startBoneWeight = unpack('<2I', file.read(8))
+				self.YMP.seek(startFaceGroup)
+				for m in range(faceCount):
+					file.seek(8, 1) # always 3 for both uint32s
+					boneWeightGroupCount, boneWeightGroupOffset = unpack('<2I', file.read((2 * 4)))
+					cp = file.tell()
+					file.seek(boneWeightGroupOffset)
+					for n in range(boneWeightGroupCount):
+						weight1, weight2, weight3 = unpack('<3f', file.read((3 * 4)))
+						vertexindex = unpack('<I', file.read(4))
+					file.seek(cp)
+				for q in range(boneWeightCount):
+					file.seek(0x0C, 1)
+					memID = unpack('<H', file.read(2))[0]
+					vertexCount = unpack('B', file.read(1))[0]
+					file.seek(1, 1)
+					for r in range(vertexCount):
+						file.seek(0x10, 1)
+						weight1, weight2, weight3 = unpack('<3f', file.read((3 * 4)))
+						vertexindex = unpack('<I', file.read(4))
+
+				if vertexColourPTR != 0 or vertexColourPTR != STQPointer:
+					file.seek(vertexColourPTR)
+					for o in range((STQPointer - vertexColourPTR)):
+						file.seek(0x0C, 1)
+						memID = unpack('<H', file.read(2))[0]
+						vertexCount = unpack('B', file.read(1))[0]
+						file.seek(1, 1)
+						for p in range(vertexCount):
+							vec4 = unpack('<4f', file.read(4 * 4))
 
 
 
+
+
+			
+
+
+						
 
