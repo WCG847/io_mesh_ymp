@@ -1,135 +1,143 @@
+from io import BytesIO
 from typing import BinaryIO
 from struct import unpack
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Vector, Quaternion
 from cskinmodel import CSkinModel
 
 class CSubObject(CSkinModel):
-	def Create(self, file: BinaryIO, count: int):
-		self.SubObjectEntries = []
+    def Create(self, file: BinaryIO, count: int):
+        self.SubObjectEntries = []
 
-		if file.tell() == 0:
-			return False
+        if file.tell() == 0:
+            return False
 
-		for i in range(count):
-			entry = {
-				'params': [],
-				'vertex_positions': [],
-				'weights': [],
-				'st_entries': [],
-				'vertex_colors': [],
-				'bounding_sphere_matrix': None
-			}
+        for i in range(count):
+            entry = {
+                'params': [],
+                'vertex_positions': [],
+                'normals': [],
+                'weights': [],
+                'st_entries': [],
+                'vertex_colors': [],
+                'bounding_sphere_matrix': None
+            }
 
-			# Read basic subobject data
-			paramCount, STQCount, paramPointer, STQPointer, _, vertexGroupCount, \
-			sectInfoPointer, vertexColourPTR, totalVertices, boneWeightCount, \
-			mainVertexCount, _ = unpack('<12I', file.read(12 * 4))
+            # Subobject metadata
+            paramCount, STQCount, paramPointer, STQPointer, _, vertexGroupCount, \
+            sectInfoPointer, vertexColourPTR, totalVertices, boneWeightCount, \
+            mainVertexCount, _ = unpack('<12I', file.read(12 * 4))
 
-			CentreX, CentreY, CentreZ, Radius = unpack("<4f", file.read(4 * 4))
-			scale_matrix = Matrix.Scale(Radius, 4)
-			translation_matrix = Matrix.Translation(Vector((CentreX, CentreY, CentreZ)))
-			entry['bounding_sphere_matrix'] = translation_matrix @ scale_matrix
+            CentreX, CentreY, CentreZ, Radius = unpack("<4f", file.read(4 * 4))
+            scale_matrix = Matrix.Scale(Radius, 4)
+            translation_matrix = Matrix.Translation(Vector((CentreX, CentreY, CentreZ)))
+            entry['bounding_sphere_matrix'] = translation_matrix @ scale_matrix
 
-			# Parse parameter data
-			file.seek(paramPointer)
-			for j in range(paramCount):
-				verticesAffected, boneIndicesCount, vertexPosOffset, vertexNormOffset, \
-				BoneIndex1, BoneIndex2, BoneIndex3 = unpack('<7I', file.read(7 * 4))
+            # Parameters (bone-affected groups)
+            file.seek(paramPointer)
+            for _ in range(paramCount):
+                verticesAffected, boneIndicesCount, vertexPosOffset, vertexNormOffset, \
+                BoneIndex1, BoneIndex2, BoneIndex3 = unpack('<7I', file.read(28))
 
-				entry['params'].append((verticesAffected, boneIndicesCount, vertexPosOffset, vertexNormOffset,
-										BoneIndex1, BoneIndex2, BoneIndex3))
+                entry['params'].append((verticesAffected, boneIndicesCount, vertexPosOffset,
+                                        vertexNormOffset, BoneIndex1, BoneIndex2, BoneIndex3))
 
-				cp = file.tell()
-				file.seek(vertexPosOffset)
-				for k in range(verticesAffected):
-					pos = Vector(unpack('<4f', file.read(16)))  # XYZW delta
-					weighted_pos = Vector((0.0, 0.0, 0.0))
+                bones = [BoneIndex1, BoneIndex2, BoneIndex3][:boneIndicesCount]
+                weights = [1.0 / boneIndicesCount] * boneIndicesCount  # placeholder weights
 
-					bones = [BoneIndex1, BoneIndex2, BoneIndex3][:boneIndicesCount]
+                # Positions
+                file.seek(vertexPosOffset)
+                for _ in range(verticesAffected):
+                    pos = Vector(unpack('<4f', file.read(16)))
+                    weighted_pos = Vector((0.0, 0.0, 0.0))
 
-					# Dummy weights for now, corrected later
-					weights = [1.0 / boneIndicesCount] * boneIndicesCount
+                    for b_idx, bone_id in enumerate(bones):
+                        _, _, _, _, bone_matrix, restpose = self.BoneEntries[bone_id]
+                        inv_bind = restpose.inverted()
+                        final_matrix = bone_matrix @ inv_bind
+                        weighted_pos += (final_matrix @ pos.to_3d()) * weights[b_idx]
 
-					for b_idx, bone_id in enumerate(bones):
-						bone_name, _, _, _, bone_matrix, restpose = self.BoneEntries[bone_id]
-						inv_bind = restpose.inverted()
-						final_matrix = bone_matrix @ inv_bind
-						weighted_pos += (final_matrix @ pos.to_3d()) * weights[b_idx]
+                    entry['vertex_positions'].append(weighted_pos)
 
-					entry['vertex_positions'].append(weighted_pos)
+                # Normals
+                file.seek(vertexNormOffset)
+                for _ in range(verticesAffected):
+                    normal = Vector(unpack('<4f', file.read(16)))
+                    transformed_normal = Vector((0.0, 0.0, 0.0))
 
-				file.seek(cp)
+                    for b_idx, bone_id in enumerate(bones):
+                        _, _, _, _, bone_matrix, restpose = self.BoneEntries[bone_id]
+                        inv_bind = restpose.inverted()
+                        final_matrix = bone_matrix @ inv_bind
+                        n = final_matrix.to_3x3() @ normal.to_3d()
+                        transformed_normal += n.normalized() * weights[b_idx]
 
-			# Parse STQ entries
-			file.seek(STQPointer)
-			for l in range(STQCount):
-				st_data = unpack('<8f', file.read(32))  # 4 ST pairs
-				STGroupID, GroupInterpretation, BatchID, marker = unpack('<4I', file.read(16))
+                    entry['normals'].append(transformed_normal.normalized())
 
-				ST_Entries = [
-					(st_data[0], st_data[1]),
-					(st_data[2], st_data[3]),
-					(st_data[4], st_data[5]),
-				]
+            # STQ data
+            file.seek(STQPointer)
+            for _ in range(STQCount):
+                st_data = unpack('<8f', file.read(32))  # 4 ST pairs
+                STGroupID, GroupInterpretation, BatchID, marker = unpack('<4I', file.read(16))
 
-				# Check if extended STs needed
-				if GroupInterpretation == 7 and l < STQCount - 1 and marker == 0:
-					st_data2 = unpack('<8f', file.read(32))
-					STGroupID, GroupInterpretation, BatchID, marker = unpack('<4I', file.read(16))
-					ST_Entries += [
-						(st_data2[0], st_data2[1]),
-						(st_data2[2], st_data2[3]),
-						(st_data2[4], st_data2[5]),
-					]
+                ST_Entries = [
+                    (st_data[0], st_data[1]),
+                    (st_data[2], st_data[3]),
+                    (st_data[4], st_data[5]),
+                ]
 
-				entry['st_entries'].append(ST_Entries)
+                if GroupInterpretation == 7 and marker == 0:
+                    st_data2 = unpack('<8f', file.read(32))
+                    STGroupID, GroupInterpretation, BatchID, marker = unpack('<4I', file.read(16))
+                    ST_Entries += [
+                        (st_data2[0], st_data2[1]),
+                        (st_data2[2], st_data2[3]),
+                        (st_data2[4], st_data2[5]),
+                    ]
 
-				file.seek(0x60, 1)  # skip unknowns
+                entry['st_entries'].append(ST_Entries)
 
-				groupCount, PS2Ram, faceCount = unpack('<3H', file.read(6))
-				startFaceGroup, startBoneWeight = unpack('<2I', file.read(8))
+                file.seek(0x60, 1)  # Skip unknowns
+                _, _, faceCount = unpack('<3H', file.read(6))
+                startFaceGroup, _ = unpack('<2I', file.read(8))
 
-				# Bone weight section
-				file.seek(startFaceGroup)
-				for m in range(faceCount):
-					file.seek(8, 1)
-					boneWeightGroupCount, boneWeightGroupOffset = unpack('<2I', file.read(8))
-					cp = file.tell()
-					file.seek(boneWeightGroupOffset)
-					for n in range(boneWeightGroupCount):
-						weight1, weight2, weight3 = unpack('<3f', file.read(12))
-						vertexindex = unpack('<I', file.read(4))[0]
-						if vertexindex < len(entry['weights']):
-							entry['weights'][vertexindex] = (weight1, weight2, weight3)
-						else:
-							entry['weights'].append((weight1, weight2, weight3))
-					file.seek(cp)
+                file.seek(startFaceGroup)
+                for _ in range(faceCount):
+                    file.seek(8, 1)
+                    boneWeightGroupCount, boneWeightGroupOffset = unpack('<2I', file.read(8))
+                    cp = file.tell()
+                    file.seek(boneWeightGroupOffset)
+                    for _ in range(boneWeightGroupCount):
+                        weight1, weight2, weight3 = unpack('<3f', file.read(12))
+                        vertexindex = unpack('<I', file.read(4))[0]
+                        while len(entry['weights']) <= vertexindex:
+                            entry['weights'].append((0.0, 0.0, 0.0))
+                        entry['weights'][vertexindex] = (weight1, weight2, weight3)
+                    file.seek(cp)
 
-			# Additional bone weights per group
-			for q in range(boneWeightCount):
-				file.seek(0x0C, 1)
-				memID = unpack('<H', file.read(2))[0]
-				vertexCount = unpack('B', file.read(1))[0]
-				file.seek(1, 1)
-				for r in range(vertexCount):
-					file.seek(0x10, 1)
-					weight1, weight2, weight3 = unpack('<3f', file.read(12))
-					vertexindex = unpack('<I', file.read(4))[0]
-					if vertexindex < len(entry['weights']):
-						entry['weights'][vertexindex] = (weight1, weight2, weight3)
-					else:
-						entry['weights'].append((weight1, weight2, weight3))
+            # Per-vertex bone weights
+            for _ in range(boneWeightCount):
+                file.seek(0x0C, 1)
+                memID = unpack('<H', file.read(2))[0]
+                vertexCount = unpack('B', file.read(1))[0]
+                file.seek(1, 1)
+                for _ in range(vertexCount):
+                    file.seek(0x10, 1)
+                    weight1, weight2, weight3 = unpack('<3f', file.read(12))
+                    vertexindex = unpack('<I', file.read(4))[0]
+                    while len(entry['weights']) <= vertexindex:
+                        entry['weights'].append((0.0, 0.0, 0.0))
+                    entry['weights'][vertexindex] = (weight1, weight2, weight3)
 
-			# Vertex colors
-			if vertexColourPTR != 0 and vertexColourPTR != STQPointer:
-				file.seek(vertexColourPTR)
-				for o in range(STQPointer - vertexColourPTR):
-					file.seek(0x0C, 1)
-					memID = unpack('<H', file.read(2))[0]
-					vertexCount = unpack('B', file.read(1))[0]
-					file.seek(1, 1)
-					for p in range(vertexCount):
-						vec4 = unpack('<4f', file.read(16))
-						entry['vertex_colors'].append(vec4)
+            # Vertex colors
+            if vertexColourPTR != 0 and vertexColourPTR != STQPointer:
+                file.seek(vertexColourPTR)
+                while file.tell() < STQPointer:
+                    file.seek(0x0C, 1)
+                    memID = unpack('<H', file.read(2))[0]
+                    vertexCount = unpack('B', file.read(1))[0]
+                    file.seek(1, 1)
+                    for _ in range(vertexCount):
+                        vec4 = unpack('<4f', file.read(16))
+                        entry['vertex_colors'].append(vec4)
 
-			self.SubObjectEntries.append(entry)
+            self.SubObjectEntries.append(entry)
