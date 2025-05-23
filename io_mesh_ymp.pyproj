@@ -23,6 +23,7 @@
   <ItemGroup>
     <Compile Include="Import\cskinmodel.py" />
     <Compile Include="Import\csubobject.py" />
+    <Compile Include="Import\__init__.py" />
     <Compile Include="__init__.py" />
   </ItemGroup>
   <ItemGroup>
