@@ -55,6 +55,8 @@ class CSubObject(CSkinModel):
 			vertexposptr = unpack("<I", self.file.read(4))[0]
 			self.file.seek(vertexposptr + 0x0C)
 			self.vertices, self.normals = self.VertexParser()
+			if colourptr == uvpointer:
+				print('No colours. Parsing UVs')
 
 
 	def VertexParser(self):
@@ -105,6 +107,6 @@ class CSubObject(CSkinModel):
 					resolved = tuple(base[j] + vec[j] for j in range(3))  # only x, y, z
 					normals.append(resolved)
 
-				print(f'Resolved {len(vertices)} vertex normals')
+				print(f'Resolved {len(normals)} vertex normals')
 
 			return vertices, normals
