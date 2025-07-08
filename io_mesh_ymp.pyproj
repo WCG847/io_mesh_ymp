@@ -22,12 +22,15 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="Export\subobjectexporter.py" />
+    <Compile Include="Export\ympexporter.py" />
     <Compile Include="Import\cskinmodel.py" />
     <Compile Include="Import\subobject.py" />
     <Compile Include="Import\__init__.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Import\" />
+    <Folder Include="Export\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in
