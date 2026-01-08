@@ -123,3 +123,27 @@ class SkinModel:
 			collect = bpy.data.collections.new(name)
 			bpy.context.scene.collection.children.link(collect)
 			self.cols.append(collect)
+
+		subobject_count = self.file[4]
+		subobject_ptr = get_view(self.file, 28)
+		for i in range(subobject_count):
+			_ = bpy.data.meshes.new('ympSubObject') # we just use bpy_obj.data
+			bpy_obj = bpy.data.objects.new(f'Object{i:02d}', _)
+			subobj = subobject_ptr[i*64:(i*64)+64]
+			skin_tbl_count, uv_count, a, b, og_index, c, d, e = subobj[:32].cast('I')
+			self.cols[og_index].objects.link(bpy_obj)
+			skin_stream = get_view(subobj, 8)
+			primitive_stream = get_view(subobj, 12)
+			vertex_colour = get_view(subobj, 28)
+			bounding_sphere = subobj[48:64].cast('f')
+			centre = Vector((bounding_sphere[0], bounding_sphere[1], bounding_sphere[2]))
+			radius = bounding_sphere[3]
+			sphere = bpy.data.objects.new(f'ySphere_{i:02d}', None)
+			sphere.empty_display_type = 'SPHERE'
+			sphere.empty_display_size = radius
+			sphere.location = centre
+			bpy.context.scene.collection.objects.link(sphere)
+
+			sphere.parent = bpy_obj
+			sphere.hide_select = True
+			sphere.hide_render = True
