@@ -1,9 +1,20 @@
-from struct import unpack
 from typing import Iterable
 import warnings
 import math
 import bpy
 from mathutils import Euler, Matrix, Vector
+
+
+def emit_strip_faces(strip, faces):
+	for t in range(len(strip) - 2):
+		a, b, c = (
+			(strip[t + 1], strip[t], strip[t + 2])
+			if (t & 1)
+			else (strip[t], strip[t + 1], strip[t + 2])
+		)
+		if a == b or b == c or a == c:
+			continue
+		faces.append((a, b, c))
 
 
 def get_view(src: memoryview, offset: int):
@@ -23,6 +34,8 @@ def link(obj: bpy.types.Object, mode="EDIT"):
 
 
 class SkinModel:
+	AXIS_FIX = Matrix.Rotation(math.radians(-90.0), 4, "X")
+
 	def __init__(self, file: memoryview, scale: float):
 		if file:
 			self.file = file.cast("I")
@@ -127,23 +140,216 @@ class SkinModel:
 		subobject_count = self.file[4]
 		subobject_ptr = get_view(self.file, 28)
 		for i in range(subobject_count):
-			_ = bpy.data.meshes.new('ympSubObject') # we just use bpy_obj.data
-			bpy_obj = bpy.data.objects.new(f'Object{i:02d}', _)
-			subobj = subobject_ptr[i*64:(i*64)+64]
-			skin_tbl_count, uv_count, a, b, og_index, c, d, e = subobj[:32].cast('I')
+			_ = bpy.data.meshes.new("ympSubObject")
+
+			bpy_obj = bpy.data.objects.new(f"Object{i:02d}", _)
+			subobj = subobject_ptr[i * 64 : (i * 64) + 64]
+			skin_tbl_count, uv_count, a, b, og_index, c, d, e = subobj[:32].cast("I")
 			self.cols[og_index].objects.link(bpy_obj)
-			skin_stream = get_view(subobj, 8)
-			primitive_stream = get_view(subobj, 12)
-			vertex_colour = get_view(subobj, 28)
-			bounding_sphere = subobj[48:64].cast('f')
-			centre = Vector((bounding_sphere[0], bounding_sphere[1], bounding_sphere[2]))
+			f = self.file.cast("B")
+			sub = subobj.cast("I")
+			skin_stream = f[sub[2] :]
+			primitive_stream = f[sub[3] :]
+			vertex_colour = f[sub[7] :]
+			bounding_sphere = subobj[48:64].cast("f")
+			centre = SkinModel.AXIS_FIX @ Vector(
+				(bounding_sphere[0], bounding_sphere[1], bounding_sphere[2])
+			)
+
 			radius = bounding_sphere[3]
-			sphere = bpy.data.objects.new(f'ySphere_{i:02d}', None)
-			sphere.empty_display_type = 'SPHERE'
+			sphere = bpy.data.objects.new(f"ySphere_{i:02d}", None)
+			sphere.empty_display_type = "SPHERE"
 			sphere.empty_display_size = radius
 			sphere.location = centre
-			bpy.context.scene.collection.objects.link(sphere)
+			self.cols[og_index].objects.link(sphere)
 
 			sphere.parent = bpy_obj
 			sphere.hide_select = True
 			sphere.hide_render = True
+			sphere.hide_viewport = True
+
+			bpy_obj.display_type = "TEXTURED"
+			used = [False] * len(self.bones)
+			tables = []
+			table_offsets = []
+			base_verts = []
+
+			bpy_obj.parent = self.armature
+			mod = bpy_obj.modifiers.new(name="Armature", type="ARMATURE")
+			mod.object = self.armature
+
+			global_verts, global_norms = self.parse_vertex_buffer(subobj)
+			print("GLOBAL VERTS:", len(global_verts))
+
+			tables = []
+			for t in range(skin_tbl_count):
+				table = self.send_table(skin_stream[t * 32 : (t * 32) + 32])
+				tables.append(table)
+
+			used_bones = set()
+			for table in tables:
+				for b in table["palette"]:
+					if b >= 0:
+						used_bones.add(b)
+
+			for b in used_bones:
+				name = self.bones[b].name
+				if name not in bpy_obj.vertex_groups:
+					bpy_obj.vertex_groups.new(name=name)
+
+			verts, faces, uvs, vtx_weights, out_norms = self.send_primitive_table(
+				primitive_stream,
+				uv_count,
+				tables,
+				global_verts,
+				global_norms,
+			)
+
+			mesh = bpy_obj.data
+			mesh.clear_geometry()
+			mesh.from_pydata(verts, [], faces)
+			mesh.update()
+
+			loop_normals = [None] * len(mesh.loops)
+
+			for poly in mesh.polygons:
+				for li, vi in zip(poly.loop_indices, poly.vertices):
+					loop_normals[li] = out_norms[vi]
+			assert all(loop_normals)
+			mesh.normals_split_custom_set(loop_normals)
+
+			uv_layer = mesh.uv_layers.new(name="UVMap")
+
+			for poly in mesh.polygons:
+				for li, vi in zip(poly.loop_indices, poly.vertices):
+					uv_layer.data[li].uv = uvs[vi] if vi < len(uvs) else (0.0, 0.0)
+
+			for v_idx, ws in vtx_weights.items():
+				for bone_idx, w in ws:
+					if w <= 0.0:
+						continue
+
+					name = self.bones[bone_idx].name
+
+					if name not in bpy_obj.vertex_groups:
+						bpy_obj.vertex_groups.new(name=name)
+
+					bpy_obj.vertex_groups[name].add([v_idx], w, "REPLACE")
+
+			mesh.update()
+			mesh.calc_loop_triangles()
+
+	def parse_vertex_buffer(self, subobj: memoryview):
+		f = self.file.cast("B")
+
+		vtx_indirect_ptr = subobj.cast("I")[0x18 // 4]
+		vtx_indirect = f[vtx_indirect_ptr:]
+		f = self.file.cast("B")
+		vtx_indirec = vtx_indirect.cast("I")
+		vtx_indirect = f[vtx_indirec[0] :]
+
+		vtx_count = vtx_indirect[0x0E]
+
+		vtx_data = vtx_indirect[0x10:]
+
+		verts: list[Vector] = []
+
+		for i in range(vtx_count):
+			x, y, z, _ = vtx_data[i * 16 : (i * 16) + 16].cast("f")
+			verts.append(SkinModel.AXIS_FIX @ Vector((x, y, z)))
+		size = vtx_count * 16
+		packet = vtx_data[size:]
+		vtx_data = packet[0x10:]
+		norms: list[Vector] = []
+
+		for i in range(vtx_count):
+			x, y, z, _ = vtx_data[i * 16 : (i * 16) + 16].cast("f")
+			norms.append(SkinModel.AXIS_FIX @ Vector((x, y, z)))
+		return verts, norms
+
+	def send_primitive_table(self, stream, count, tables, global_verts, global_norms):
+		verts = []
+		faces = []
+		uvs = []
+		weights = {}
+		out_norms = []
+
+		f = self.file.cast("B")
+		out_vi = 0
+
+		for i in range(count):
+			strea = stream[i * 208 : (i * 208) + 208]
+			UVS = strea.cast("f")
+
+			U0, V0, _, _ = UVS[0:4]
+			U1, V1, _, _ = UVS[4:8]
+			uv = (U0 * U1, 1.0 - (V0 * V1))
+
+			info = strea[192:208]
+			INFO2 = info.cast("I")
+			loop_count = INFO2[1]
+			loop_table = INFO2[2]
+			LOOPS = f[loop_table:]
+
+			for j in range(loop_count):
+				strip = []
+
+				entry = LOOPS[j * 16 : (j * 16) + 16].cast("I")
+				block_count = entry[2]
+				block_start = f[entry[3] :]
+
+				for k in range(block_count):
+					BLOCK = block_start[k * 32 : (k * 32) + 32]
+					BI = BLOCK.cast("I")
+					BF = BLOCK.cast("f")
+
+					w0, w1, w2 = BF[:3]
+					global_vi = BI[3]
+
+					if global_vi < 0 or global_vi >= len(global_verts):
+						emit_strip_faces(strip, faces)
+						strip.clear()
+						continue
+
+					if w0 == 0.0 and w1 == 0.0 and w2 == 0.0:
+						emit_strip_faces(strip, faces)
+						strip.clear()
+						continue
+
+					pos = global_verts[global_vi]
+					verts.append(pos.copy())
+
+					out_norms.append(global_norms[global_vi].normalized())
+
+					uvs.append(uv)
+
+					weights[out_vi] = []
+
+					if k < len(tables):
+						palette = tables[k]["palette"]
+
+						if w0 > 0 and len(palette) > 0 and palette[0] >= 0:
+							weights[out_vi].append((palette[0], w0))
+						if w1 > 0 and len(palette) > 1 and palette[1] >= 0:
+							weights[out_vi].append((palette[1], w1))
+						if w2 > 0 and len(palette) > 2 and palette[2] >= 0:
+							weights[out_vi].append((palette[2], w2))
+
+					strip.append(out_vi)
+					out_vi += 1
+
+				emit_strip_faces(strip, faces)
+
+		return verts, faces, uvs, weights, out_norms
+
+	def send_table(self, stream: memoryview):
+		table = stream.cast("I")
+		indices = stream[16:32].cast("i")
+
+		bone_count = table[1]
+
+		palette: list[int] = []
+		for i in range(bone_count):
+			palette.append(indices[i] - 1 if indices[i] > 0 else -1)
+
+		return {"palette": palette}
