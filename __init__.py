@@ -15,6 +15,9 @@ import bpy
 from bpy.types import AddonPreferences, Operator
 from bpy_extras.io_utils import ImportHelper
 from bpy.props import FloatProperty, StringProperty
+from bpy.props import CollectionProperty
+from bpy.types import OperatorFileListElement
+
 from .src.ps2.Import.skinmodel import SkinModel
 
 class YMP_PROPS(AddonPreferences):
@@ -33,8 +36,19 @@ class IMPORT_YMP(Operator, ImportHelper):
 	filename_ext = ".ymp"
 
 	filter_glob: StringProperty(
-		default="*.ymp",
+		default="*.ymp;*.yobj",
 		options={'HIDDEN'}
+	)
+	use_filter_folder = True
+	use_filter = True
+
+	files: CollectionProperty(
+		name="File Path",
+		type=OperatorFileListElement
+	)
+
+	directory: StringProperty(
+		subtype='DIR_PATH'
 	)
 
 	scale: FloatProperty(
@@ -45,22 +59,33 @@ class IMPORT_YMP(Operator, ImportHelper):
 	)
 
 	def execute(self, context):
-		if self.filepath:
-			with open(self.filepath, 'rb') as f:
-				assert f.read(4) == b'YOBJ'
-				file = memoryview(bytearray(f.read([f.seek(4), int.from_bytes(f.read(4), 'little')][1])))
+		for file_elem in self.files:
+			full_path = bpy.path.abspath(
+				self.directory + file_elem.name
+			)
+
+			with open(full_path, 'rb') as f:
+				if f.read(4) != b'YOBJ':
+					self.report({'WARNING'}, f"Skipping {file_elem.name}")
+					continue
+
+				size = int.from_bytes(f.read(4), 'little')
+				file = memoryview(bytearray(f.read(size)))
+
 				m = SkinModel(file, self.scale)
-			m.start()
+				m.start()
+
 		return {'FINISHED'}
+
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_YMP.bl_idname, text="YMP (.ymp)")
+	self.layout.operator(IMPORT_YMP.bl_idname, text="YMP (.ymp)")
 
 def register():
-    bpy.utils.register_class(YMP_PROPS)
-    bpy.utils.register_class(IMPORT_YMP)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+	bpy.utils.register_class(YMP_PROPS)
+	bpy.utils.register_class(IMPORT_YMP)
+	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    bpy.utils.unregister_class(IMPORT_YMP)
-    bpy.utils.unregister_class(YMP_PROPS)
+	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+	bpy.utils.unregister_class(IMPORT_YMP)
+	bpy.utils.unregister_class(YMP_PROPS)

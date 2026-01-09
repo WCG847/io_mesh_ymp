@@ -151,6 +151,7 @@ class SkinModel:
 			skin_stream = f[sub[2] :]
 			primitive_stream = f[sub[3] :]
 			vertex_colour = f[sub[7] :]
+			colour_count = sub[9]
 			bounding_sphere = subobj[48:64].cast("f")
 			centre = SkinModel.AXIS_FIX @ Vector(
 				(bounding_sphere[0], bounding_sphere[1], bounding_sphere[2])
@@ -196,6 +197,7 @@ class SkinModel:
 				name = self.bones[b].name
 				if name not in bpy_obj.vertex_groups:
 					bpy_obj.vertex_groups.new(name=name)
+			#self.parse_colours(vertex_colour, colour_count)
 
 			verts, faces, uvs, vtx_weights, out_norms = self.send_primitive_table(
 				primitive_stream,
@@ -238,6 +240,8 @@ class SkinModel:
 
 			mesh.update()
 			mesh.calc_loop_triangles()
+		bpy.ops.object.mode_set(mode="OBJECT")
+		bpy.ops.des
 
 	def parse_vertex_buffer(self, subobj: memoryview):
 		f = self.file.cast("B")
