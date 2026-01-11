@@ -3,6 +3,7 @@ import warnings
 import math
 import bpy
 from mathutils import Euler, Matrix, Vector
+import bmesh
 
 
 def emit_strip_faces(strip, faces):
@@ -241,7 +242,28 @@ class SkinModel:
 			mesh.update()
 			mesh.calc_loop_triangles()
 		bpy.ops.object.mode_set(mode="OBJECT")
-		bpy.ops.des
+		for area in bpy.context.screen.areas:
+			if area.type == 'VIEW_3D':
+				space = area.spaces.active
+				space.overlay.show_bones = False
+				space.shading.show_object_outline = False
+				space.shading.show_backface_culling = False
+		original_active = bpy.context.view_layer.objects.active
+
+		for obj in bpy.context.scene.objects:
+			if obj.type == 'MESH':
+				bpy.context.view_layer.objects.active = obj
+				obj.select_set(True)
+				bpy.ops.object.mode_set(mode='EDIT')
+				bpy.ops.mesh.select_all(action='SELECT')
+				bpy.ops.mesh.flip_normals() # trick blender into thinking our inwards faces is outwards
+				bpy.ops.object.mode_set(mode='OBJECT')
+				obj.select_set(False)
+
+		bpy.context.view_layer.objects.active = original_active
+
+
+
 
 	def parse_vertex_buffer(self, subobj: memoryview):
 		f = self.file.cast("B")
@@ -271,7 +293,7 @@ class SkinModel:
 			norms.append(SkinModel.AXIS_FIX @ Vector((x, y, z)))
 		return verts, norms
 
-	def send_primitive_table(self, stream, count, tables, global_verts, global_norms):
+	def send_primitive_table(self, stream: memoryview, count, tables, global_verts, global_norms):
 		verts = []
 		faces = []
 		uvs = []
@@ -284,10 +306,14 @@ class SkinModel:
 		for i in range(count):
 			strea = stream[i * 208 : (i * 208) + 208]
 			UVS = strea.cast("f")
-
-			U0, V0, _, _ = UVS[0:4]
-			U1, V1, _, _ = UVS[4:8]
-			uv = (U0 * U1, 1.0 - (V0 * V1))
+			t = strea.cast('I')
+			S0, T0, Q0, _ = UVS[0:4]
+			S1, T1, Q1, _ = UVS[4:8]
+			#texture = self.tex_array[t[9]]
+			#width = texture.size[0]
+			#height = texture.size[1]
+			width = 256
+			height = 256
 
 			info = strea[192:208]
 			INFO2 = info.cast("I")
@@ -315,6 +341,20 @@ class SkinModel:
 						strip.clear()
 						continue
 
+					S = S0 * S1
+					T = T0 * T1
+					Q = 1.0
+
+
+					# GS fixed-point correction
+					S = (S * 256.0 - 0.5) / 256.0
+					T = (T * 256.0 - 0.5) / 256.0
+
+					# Convert pixel coords → Blender UVs
+					U = S / width
+					V = 1.0 - (T / height)
+
+
 					if w0 == 0.0 and w1 == 0.0 and w2 == 0.0:
 						emit_strip_faces(strip, faces)
 						strip.clear()
@@ -322,10 +362,12 @@ class SkinModel:
 
 					pos = global_verts[global_vi]
 					verts.append(pos.copy())
-
 					out_norms.append(global_norms[global_vi].normalized())
 
-					uvs.append(uv)
+					uvs.append((U, V))
+
+
+
 
 					weights[out_vi] = []
 

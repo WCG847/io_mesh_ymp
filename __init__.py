@@ -13,7 +13,7 @@ bl_info = {
 
 import bpy
 from bpy.types import AddonPreferences, Operator
-from bpy_extras.io_utils import ImportHelper
+from bpy_extras.io_utils import ExportHelper, ImportHelper
 from bpy.props import FloatProperty, StringProperty
 from bpy.props import CollectionProperty
 from bpy.types import OperatorFileListElement
@@ -32,6 +32,7 @@ class YMP_PROPS(AddonPreferences):
 class IMPORT_YMP(Operator, ImportHelper):
 	bl_idname = "import_scene.ymp"
 	bl_label = "Import YMP"
+	bl_description = "Imports Yuke's Models"
 
 	filename_ext = ".ymp"
 
@@ -55,6 +56,7 @@ class IMPORT_YMP(Operator, ImportHelper):
 		name="Scale",
 		min=0.0,
 		max=16.0,
+		default=1.0,
 		subtype='FACTOR'
 	)
 
@@ -77,15 +79,36 @@ class IMPORT_YMP(Operator, ImportHelper):
 
 		return {'FINISHED'}
 
+class EXPORT_YMP(Operator, ExportHelper):
+	bl_idname = "export_scene.ymp"
+	bl_label = "Export YMP"
+	bl_description = "Exports Yuke's Models"
+
+	filename_ext = ".ymp"
+
+	use_filter_folder = True
+	use_filter = True
+	def execute(self, context):
+		pass
+
 def menu_func_import(self, context):
 	self.layout.operator(IMPORT_YMP.bl_idname, text="YMP (.ymp)")
+
+def menu_func_export(self, context):
+	self.layout.operator(EXPORT_YMP.bl_idname, text="YMP (.ymp)")
 
 def register():
 	bpy.utils.register_class(YMP_PROPS)
 	bpy.utils.register_class(IMPORT_YMP)
+	bpy.utils.register_class(EXPORT_YMP)
 	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+	bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 def unregister():
 	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+	bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
 	bpy.utils.unregister_class(IMPORT_YMP)
+	bpy.utils.unregister_class(EXPORT_YMP)
 	bpy.utils.unregister_class(YMP_PROPS)
+
+
