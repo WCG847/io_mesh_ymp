@@ -23,9 +23,11 @@
   </PropertyGroup>
   <ItemGroup>
     <Folder Include="src\" />
+    <Folder Include="src\Xbox\" />
     <Folder Include="src\ps2\" />
     <Folder Include="src\ps2\Import\" />
     <Folder Include="src\ps2\Export\" />
+    <Folder Include="src\Xbox\Import\" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src\ps2\Export\chunk.py" />
@@ -33,6 +35,7 @@
     <Compile Include="src\ps2\Import\skinmodel.py" />
     <Compile Include="src\ps2\Import\__init__.py" />
     <Compile Include="src\ps2\__init__.py" />
+    <Compile Include="src\Xbox\Import\skinmodel.py" />
     <Compile Include="src\__init__.py" />
     <Compile Include="__init__.py" />
   </ItemGroup>
