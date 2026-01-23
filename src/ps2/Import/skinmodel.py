@@ -113,6 +113,42 @@ class SkinModel:
 
 		self.tex_array: list[bpy.types.Image] = []
 
+	def parse_weights(self, weight: memoryview):
+		view = weight.cast("B")
+		offset = 0
+		all_weights = []
+
+		while offset + 16 <= len(view):
+
+			# Read potential VIF header
+			pad = view[offset:offset+12]
+			opcode = int.from_bytes(view[offset+12:offset+14], "little")
+			elements = view[offset+15]
+
+			# Check for valid UNPACK 0x280 packet
+			if pad == b"\x00" * 12 and opcode == 0x280:
+
+				if elements == 0:
+					elements = 256
+
+				offset += 16  # Skip VIF header
+
+				for _ in range(elements):
+					if offset + 16 > len(view):
+						break
+
+					w0, w1, w2, w3 = view[offset:offset+16].cast("f")
+					all_weights.append((w0, w1, w2, w3))
+					offset += 16
+
+			else:
+				# Desync recovery: crawl forward like a wounded soldier
+				offset += 1
+
+		return all_weights
+
+
+
 	def set_texture(self, path: str):
 		if (tex_count := self.file[6]) <= 0:
 			warnings.warn("No textures in file. Skipping.", BytesWarning)
@@ -222,15 +258,18 @@ class SkinModel:
 				name = self.bones[b].name
 				if name not in bpy_obj.vertex_groups:
 					bpy_obj.vertex_groups.new(name=name)
-			# self.parse_colours(vertex_colour, colour_count)
-
+			'''May actually be vertex weights. Research into this
+			'''
+			parsed_weights = self.parse_weights(vertex_colour) # yes i know. I cant be arsed
 			verts, faces, uvs, vtx_weights, out_norms, face_uvs, face_materials = self.send_primitive_table(
 				primitive_stream,
 				uv_count,
 				tables,
 				global_verts,
 				global_norms,
+				parsed_weights,
 			)
+
 
 			mesh = bpy_obj.data
 
@@ -357,9 +396,7 @@ class SkinModel:
 			self.materials.append(mat)
 
 
-	def send_primitive_table(
-		self, stream: memoryview, count, tables, global_verts, global_norms
-	):
+	def send_primitive_table(self, stream, count, tables, global_verts, global_norms, parsed_weights):
 		verts = []
 		faces = []
 		face_uvs = []
@@ -372,7 +409,7 @@ class SkinModel:
 
 		for i in range(count):
 			strea = stream[i * 208 : (i * 208) + 208]
-			UVS = strea.cast("f")
+			UVS = strea.cast("f") # actually overlay colours. Game-specific, we wont import this
 			t = strea.cast("I")
 			X0, Y0, Z0, W0 = UVS[0:4]
 			X1, Y1, Z1, W1 = UVS[4:8]
@@ -395,8 +432,6 @@ class SkinModel:
 					BLOCK = block_start[k * 32 : (k * 32) + 32]
 					BI = BLOCK.cast("I")
 					BF = BLOCK.cast("f")
-
-					w0, w1, w2 = BF[:3]
 					global_vi = BI[3]
 
 					if global_vi < 0 or global_vi >= len(global_verts):
@@ -407,12 +442,6 @@ class SkinModel:
 
 					u = BF[0]
 					v = 1.0 - BF[1]
-					if w0 == 0.0 and w1 == 0.0 and w2 == 0.0:
-						emit_strip_faces(strip, faces, face_uvs, face_materials, texture_id)
-
-
-						strip.clear()
-						continue
 
 					pos = global_verts[global_vi]
 					verts.append(pos.copy())
@@ -422,15 +451,14 @@ class SkinModel:
 
 					weights[out_vi] = []
 
-					if k < len(tables):
-						palette = tables[k]["palette"]
+					if 0 <= global_vi < len(parsed_weights):
+						real_weights = parsed_weights[global_vi]
+						palette = tables[min(k, len(tables) - 1)]["palette"]
 
-						if w0 > 0 and len(palette) > 0 and palette[0] >= 0:
-							weights[out_vi].append((palette[0], w0))
-						if w1 > 0 and len(palette) > 1 and palette[1] >= 0:
-							weights[out_vi].append((palette[1], w1))
-						if w2 > 0 and len(palette) > 2 and palette[2] >= 0:
-							weights[out_vi].append((palette[2], w2))
+						for bone, w in zip(palette, real_weights):
+							if bone >= 0 and w > 0.0:
+								weights[out_vi].append((bone, w))
+
 
 					strip.append((out_vi, (u, v)))
 					out_vi += 1
