@@ -100,7 +100,6 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 	directory: StringProperty(
 		subtype='DIR_PATH'
 	)
-	tex_path: StringProperty(name='textures', subtype='FILE_PATH', maxlen=260)
 	scale: FloatProperty(
 		name="Scale",
 		min=0.0,
@@ -124,9 +123,14 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 				file = memoryview(bytearray(f.read(size)))
 
 				m = YMXEN_SkinModel(file, self.scale)
-				if self.tex_path:
-					pass
-				#m.start()
+				tex_dir = self.directory
+
+				for name in os.listdir(tex_dir):
+					full_path = os.path.join(tex_dir, name)
+					if full_path.lower().endswith(".tex"):
+						m.set_textures(memoryview(open(full_path, 'rb').read()))
+
+				m.start()
 
 		return {'FINISHED'}
 

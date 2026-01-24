@@ -1,3 +1,4 @@
+from struct import unpack_from
 from typing import Iterable
 import warnings
 import math
@@ -146,7 +147,6 @@ class SkinModel:
 				offset += 1
 
 		return all_weights
-
 
 
 	def set_texture(self, path: str):
