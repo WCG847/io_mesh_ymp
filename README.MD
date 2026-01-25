@@ -1,6 +1,6 @@
 # IO_MESH_YMP
 ## Introduction
-`io_mesh_ymp` is an addon that imports Yuke's **YMP** files (.YOBJ) into Blender. Currently, PS2 models are only supported.
+`io_mesh_ymp` is an addon that imports Yuke's **YMP** files (.YOBJ) into Blender. Currently, PS2 and xbox 360 models are only supported.
 ## Checklist
 * Imports Vertex Positions (Y)
 * Imports Vertex Normals (Y)
