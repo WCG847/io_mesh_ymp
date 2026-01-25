@@ -228,6 +228,7 @@ class YMXEN_SkinModel:
 					if name not in bpy_obj.vertex_groups:
 						bpy_obj.vertex_groups.new(name=name)
 			NORMALS, XYZS, DIFFUSES = self.send_fvf(vertex_count, vertices, bpy_obj)
+			NORMALS = [-n for n in NORMALS]
 			vertex_weights = self.send_weights(vertex_count, weights, bone_count)
 
 			for v_idx, influences in enumerate(vertex_weights):
@@ -276,28 +277,6 @@ class YMXEN_SkinModel:
 				material_count,
 				bpy_obj,
 			)
-		bpy.ops.object.mode_set(mode="OBJECT")
-		for area in bpy.context.screen.areas:
-			if area.type == "VIEW_3D":
-				space = area.spaces.active
-				space.overlay.show_bones = False
-				space.shading.show_object_outline = False
-				space.shading.show_backface_culling = False
-				space.shading.type = "MATERIAL"
-
-		original_active = bpy.context.view_layer.objects.active
-
-		for obj in bpy.context.scene.objects:
-			if obj.type == "MESH":
-				bpy.context.view_layer.objects.active = obj
-				obj.select_set(True)
-				bpy.ops.object.mode_set(mode="EDIT")
-				bpy.ops.mesh.select_all(action="SELECT")
-				bpy.ops.mesh.flip_normals()  # trick blender into thinking our inwards faces is outwards
-				bpy.ops.object.mode_set(mode="OBJECT")
-				obj.select_set(False)
-
-		bpy.context.view_layer.objects.active = original_active
 
 	def set_shader(
 		self,
@@ -456,9 +435,13 @@ class YMXEN_SkinModel:
 
 				# Flip winding every other triangle
 				if i & 1:
-					faces.append((a, c, b))
+					tri = (a, c, b)
 				else:
-					faces.append((a, b, c))
+					tri = (a, b, c)
+
+				# DX9 (LH, CW) → Blender (RH, CCW)
+				faces.append((tri[0], tri[2], tri[1]))
+
 
 		mesh = subobj.data
 		return faces

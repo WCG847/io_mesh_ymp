@@ -119,6 +119,7 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 					m.apply_muscle_config(tex_path)
 			# 5. Build meshes/materials
 			m.start()
+		bpy.ops.object.mode_set(mode="OBJECT")
 
 		return {"FINISHED"}
 
