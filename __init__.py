@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "YMP I/O",
 	"author": "WCG847",
-	"version": (3, 0, 0),
+	"version": (4, 0, 0),
 	"blender": (5, 0, 0),
 	"location": "File/Import & File/Export",
 	"description": "Import export YMP",
