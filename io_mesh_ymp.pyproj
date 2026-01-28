@@ -28,12 +28,14 @@
     <Folder Include="src\ps2\" />
     <Folder Include="src\ps2\Import\" />
     <Folder Include="src\XBOX\Import\" />
+    <Folder Include="src\XBOX\Export\" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src\globals\be.py" />
     <Compile Include="src\ps2\Import\skinmodel.py" />
     <Compile Include="src\ps2\Import\__init__.py" />
     <Compile Include="src\ps2\__init__.py" />
+    <Compile Include="src\XBOX\Export\ymxen.py" />
     <Compile Include="src\XBOX\Import\skinmodel_ymxen.py" />
     <Compile Include="src\__init__.py" />
     <Compile Include="__init__.py" />

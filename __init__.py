@@ -11,6 +11,7 @@ bl_info = {
 	"category": "Import-Export",
 }
 
+from struct import unpack_from
 import bpy
 from bpy.types import AddonPreferences, Operator
 from bpy_extras.io_utils import ExportHelper, ImportHelper
@@ -20,7 +21,7 @@ from bpy.types import OperatorFileListElement
 import os
 
 from .src.ps2.Import.skinmodel import SkinModel
-from .src.XBOX.Import.skinmodel_ymxen import YMXEN_SkinModel
+from .src.XBOX.Import.skinmodel_ymxen import YMXEN_SkinModel, install_ymxen_springs, load_dds_from_memory
 
 
 class IMPORT_YMP_PS2(Operator, ImportHelper):
@@ -61,6 +62,13 @@ class IMPORT_YMP_PS2(Operator, ImportHelper):
 		return {"FINISHED"}
 
 
+class YMP_PreviewProps(bpy.types.PropertyGroup):
+    preview_image: bpy.props.PointerProperty(
+        name="SuperStar Preview",
+        type=bpy.types.Image
+    )
+
+
 class IMPORT_YMP_XBOX(Operator, ImportHelper):
 	bl_idname = "import_scene.ymp_model_xbox"
 	bl_label = "Import YMP"
@@ -80,6 +88,56 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 	scale: FloatProperty(name="Scale", min=0.0, max=16.0, default=1.0, subtype="FACTOR")
 
 	def execute(self, context):
+		tex_dir = self.directory
+
+		# ---- Pre-scan directory once ----
+
+		tex_filepacks = []
+		bane_files = []
+		abd_files = []
+
+		for name in os.listdir(tex_dir):
+			lname = name.lower()
+			path = os.path.join(tex_dir, name)
+
+			if lname.endswith(".tex"):
+				with open(path, "rb") as tf:
+					tex_filepacks.append(memoryview(tf.read()))
+
+			elif lname.startswith("bane_muscle"):
+				bane_files.append(path)
+
+			elif lname.endswith(".abd"):
+				abd_files.append(path)
+			elif lname.startswith('superstarface'):
+				img = bpy.data.images.load(path, check_existing=True)
+				context.scene.preview_props.preview_image = img
+
+		tex_filepacks = tuple(tex_filepacks)
+		# in IMPORT_YMP_XBOX.execute, after tex_filepacks = tuple(tex_filepacks)
+		shared_textures = {}
+
+		def build_shared_texture_cache(tex_filepacks):
+			for filepack in tex_filepacks:
+				header = filepack.cast("I")
+				count = header[0]
+				body = filepack[16:]
+				for i in range(count):
+					entry = body[i * 32 : (i + 1) * 32]
+					name = entry[:16].tobytes().split(b"\x00")[0].decode("shift_jis", errors="replace")
+					ext  = entry[16:20].tobytes().split(b"\x00")[0].decode("shift_jis", errors="replace")
+					if ext != "dds":
+						continue
+					size, offset = unpack_from("<2I", entry, 20)
+					data = filepack[offset : offset + size]
+					key = name.lower()
+					if key not in shared_textures:
+						shared_textures[key] = load_dds_from_memory(name, data, prefix="shared")
+		build_shared_texture_cache(tex_filepacks)
+
+
+		# ---- Per-file processing ----
+
 		for file_elem in self.files:
 			full_path = bpy.path.abspath(self.directory + file_elem.name)
 
@@ -91,37 +149,25 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 				size = int.from_bytes(f.read(4), "big")
 				file = memoryview(bytearray(f.read(size)))
 
-			# Create model
 			m = YMXEN_SkinModel(file, self.scale)
-
-			# 1. Build texture slots from YMXEN table
 			m.build_texture_slots()
-
-			# 2. Collect all .tex files
-			tex_filepacks = []
-			tex_dir = self.directory
-
-			for name in os.listdir(tex_dir):
-				if name.lower().endswith(".tex"):
-					tex_path = os.path.join(tex_dir, name)
-					with open(tex_path, "rb") as tf:
-						tex_filepacks.append(memoryview(tf.read()))
-
-			# 3. Load all textures from all .tex files
-			m.load_tex_files(tuple(tex_filepacks))
-
-			# 4. Resolve YMXEN slots against loaded textures
+			m.loaded_textures = shared_textures       # reuse!
 			m.resolve_texture_slots()
-			for name in os.listdir(tex_dir):
-				name: str
-				if name.lower().startswith("bane_muscle"):
-					tex_path = os.path.join(tex_dir, name)
-					m.apply_muscle_config(tex_path)
-			# 5. Build meshes/materials
+
+
+			for path in bane_files:
+				m.apply_muscle_config(path)
+
+			for path in abd_files:
+				m.create_attachment_points(path)
+
 			m.start()
+
 		bpy.ops.object.mode_set(mode="OBJECT")
+		install_ymxen_springs()
 
 		return {"FINISHED"}
+
 
 
 class IMPORT_MT_ymp(bpy.types.Menu):
@@ -135,21 +181,52 @@ class IMPORT_MT_ymp(bpy.types.Menu):
 		layout.operator("import_scene.ymp_model_xbox", text="XBOX (.YMXEN, .JBOY)")
 
 
+
+class VIEW3D_PT_preview_panel(bpy.types.Panel):
+    bl_label = "SuperStar Images"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Preview"
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.preview_props
+
+        layout.template_ID_preview(
+            props,
+            "preview_image",
+            new="image.new",
+            open="image.open"
+        )
+
 def menu_func_import(self, context):
 	self.layout.menu("IMPORT_MT_ymp", text="Yuke's Models")
 
 
 def register():
-	bpy.utils.register_class(IMPORT_YMP_PS2)
-	bpy.utils.register_class(IMPORT_YMP_XBOX)
-	bpy.utils.register_class(IMPORT_MT_ymp)
+    bpy.utils.register_class(YMP_PreviewProps)
+    bpy.utils.register_class(VIEW3D_PT_preview_panel)
 
-	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    bpy.types.Scene.preview_props = bpy.props.PointerProperty(
+        type=YMP_PreviewProps
+    )
+
+    bpy.utils.register_class(IMPORT_YMP_PS2)
+    bpy.utils.register_class(IMPORT_YMP_XBOX)
+    bpy.utils.register_class(IMPORT_MT_ymp)
+
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+
 
 
 def unregister():
-	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 
-	bpy.utils.unregister_class(IMPORT_YMP_PS2)
-	bpy.utils.unregister_class(IMPORT_YMP_XBOX)
-	bpy.utils.unregister_class(IMPORT_MT_ymp)
+    del bpy.types.Scene.preview_props
+
+    bpy.utils.unregister_class(VIEW3D_PT_preview_panel)
+    bpy.utils.unregister_class(YMP_PreviewProps)
+
+    bpy.utils.unregister_class(IMPORT_YMP_PS2)
+    bpy.utils.unregister_class(IMPORT_YMP_XBOX)
+    bpy.utils.unregister_class(IMPORT_MT_ymp)

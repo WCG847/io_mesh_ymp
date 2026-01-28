@@ -1,19 +1,143 @@
 import math
 from typing import TextIO
-from mathutils import Euler, Matrix, Vector
+from mathutils import Euler, Matrix, Vector, Quaternion
 from ...globals.be import get_view, resolve_view
 from struct import unpack_from, unpack
 import bpy
 import tempfile
+import uuid
+
+_HANDLER_KEY = "_ymxen_spring_handler_installed"
 
 
-def load_dds_from_memory(name: str, data: bytes):
+def _clamp(v, lo, hi):
+	return max(lo, min(hi, v))
+
+
+def _clamp_euler_xyz(e: Euler, lx: float, ly: float, lz: float) -> Euler:
+	# lx/ly/lz are treated as max absolute angles (radians) around local axes
+	# If your config is degrees, convert when reading: radians = deg * pi/180
+	x = _clamp(e.x, -lx, lx) if lx > 0.0 else e.x
+	y = _clamp(e.y, -ly, ly) if ly > 0.0 else e.y
+	z = _clamp(e.z, -lz, lz) if lz > 0.0 else e.z
+	return Euler((x, y, z), "XYZ")
+
+
+def _spring_step_pose_bone(pb: bpy.types.PoseBone, dt: float):
+	# Only process bones that have params
+	if "ymxen_spring_k" not in pb:
+		return
+
+	k = float(pb["ymxen_spring_k"])
+	damp = float(pb["ymxen_damping"])
+	visc = float(pb["ymxen_viscosity"])
+	grav = float(pb["ymxen_gravity"])
+	tscale = float(pb["ymxen_time"])
+
+	lx = float(pb.get("ymxen_lx", 0.0))
+	ly = float(pb.get("ymxen_ly", 0.0))
+	lz = float(pb.get("ymxen_lz", 0.0))
+
+	# Protect against nonsense
+	dt = max(dt, 1e-6)
+	if tscale > 1e-6:
+		dt = dt / tscale  # bigger time => slower response (common convention)
+
+	# Current basis rotation (extra rotation on top of rest)
+	q = pb.rotation_quaternion.copy()
+
+	# Angular velocity state (local axes of the bone basis)
+	omega = Vector(pb["ymxen_omega"])
+
+	# --- Spring force: pull back to rest (identity quaternion) ---
+	# Error quaternion from current -> rest
+	q_err = Quaternion((1.0, 0.0, 0.0, 0.0)) @ q.inverted()
+	axis, angle = q_err.to_axis_angle()
+
+	# Normalise angle to [-pi, pi] for sane behaviour
+	if angle > math.pi:
+		angle -= 2.0 * math.pi
+
+	# Torque-like term (axis * angle). This is the “spring”
+	spring = Vector(axis) * (angle * k)
+
+	# --- Damping: resist angular velocity ---
+	damping_term = -omega * max(0.0, damp)
+
+	# --- Viscosity: extra “drag” each step (simple exponential-ish decay) ---
+	# Treat viscosity as a per-step multiplier towards 0
+	visc_factor = 1.0 / (1.0 + max(0.0, visc) * dt)
+
+	# --- Gravity: bias towards “down” in armature space, converted to bone local ---
+	# This is a crude but useful approach: try to align bone's local +Y with world -Z.
+	# If your bone's "forward" axis isn't Y, change the local vector below.
+	arm_obj = pb.id_data  # Armature object
+	down_arm = (
+		arm_obj.matrix_world.inverted().to_3x3() @ Vector((0, 0, -1))
+	).normalized()
+	local_forward = Vector((0, 1, 0))  # bone forward axis assumption
+	# Torque direction is cross product: rotate forward towards down
+	grav_torque = local_forward.cross(down_arm) * grav
+
+	# Accumulate “angular acceleration”
+	alpha = spring + damping_term + grav_torque
+
+	# Integrate angular velocity
+	omega = (omega + alpha * dt) * visc_factor
+
+	# Apply small-angle rotation update
+	# dq ~ rotation from omega*dt about local axes
+	ax = omega.x * dt
+	ay = omega.y * dt
+	az = omega.z * dt
+	dq = (
+		Quaternion((1, 0, 0), ax)
+		@ Quaternion((0, 1, 0), ay)
+		@ Quaternion((0, 0, 1), az)
+	)
+
+	q_new = (dq @ q).normalized()
+
+	# Clamp in XYZ euler (simple and imperfect, but works for many rigs)
+	e = q_new.to_euler("XYZ")
+	e = _clamp_euler_xyz(e, lx, ly, lz)
+	q_new = e.to_quaternion()
+
+	# Write back
+	pb.rotation_quaternion = q_new
+	pb["ymxen_omega"] = [omega.x, omega.y, omega.z]
+
+
+def _ymxen_spring_handler(scene):
+	fps = scene.render.fps / max(1, scene.render.fps_base)
+	dt = 1.0 / max(1e-6, fps)
+
+	for obj in scene.objects:
+		if obj.type != "ARMATURE":
+			continue
+		for pb in obj.pose.bones:
+			_spring_step_pose_bone(pb, dt)
+
+
+def install_ymxen_springs():
+	if _ymxen_spring_handler in bpy.app.handlers.frame_change_pre:
+		return
+	bpy.app.handlers.frame_change_pre.append(_ymxen_spring_handler)
+
+
+def uninstall_ymxen_springs():
+	if _ymxen_spring_handler in bpy.app.handlers.frame_change_pre:
+		bpy.app.handlers.frame_change_pre.remove(_ymxen_spring_handler)
+	setattr(bpy.app.handlers, _HANDLER_KEY, False)
+
+
+def load_dds_from_memory(name: str, data: bytes, prefix: str):
 	tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".dds")
 	tmp.write(data)
 	tmp.close()
 
-	img = bpy.data.images.load(tmp.name)
-	img.name = name
+	img = bpy.data.images.load(tmp.name, check_existing=True)
+	img.name = f"{prefix}_{name}"
 	img.alpha_mode = "CHANNEL_PACKED"
 	return img
 
@@ -32,12 +156,45 @@ class YMXEN_SkinModel:
 	AXIS_FIX = Matrix.Rotation(math.radians(-90.0), 4, "X")
 
 	def __init__(self, file: memoryview, scale: float):
+		self.uid = uuid.uuid4().hex[:8]
+
 		if not file:
 			return
 		self.file = file
 		self.scale = scale
-		self.use_tangents = True if unpack(">I", file[:4])[0] == 16 else False
+		self.use_tangents = (
+			True if unpack(">I", file[:4])[0] == 16 else False
+		)  # also a hint that Autodesk is used (i.e Biped rigs)
+		if self.use_tangents:
+			self.scale += 10.0
 		self.create()
+
+	def create_attachment_points(self, path: str):
+		try:
+			with open(path, "rb") as abd:
+				eof = [abd.seek(0, 2), abd.tell(), abd.seek(0)][1]
+				while abd.tell() != eof:
+					id1, bone_id, x, y, z = unpack("<2h3f", abd.read(16))
+					offset_vectors = YMXEN_SkinModel.AXIS_FIX @ Vector((x, y, z))
+					if id1 == -1:
+						continue
+					else:
+						id1 -= 1
+					if bone_id == -1:
+						continue
+					else:
+						bone_id -= 1
+					empty = bpy.data.objects.new(f"abd{id1}", None)
+					empty.parent = self.armature
+					empty.parent_type = "BONE"
+					empty.parent_bone = self.bone_names[bone_id]
+					empty.matrix_parent_inverse.identity()
+					empty.location = offset_vectors
+					bpy.context.scene.collection.objects.link(empty)
+					empty.hide_viewport = True
+					empty.hide_select = True
+		except Exception:
+			return
 
 	def get_texture(self, index: int):
 		if index is None:
@@ -62,6 +219,7 @@ class YMXEN_SkinModel:
 			raw = b.cast("c")[:16].tobytes().split(b"\x00", 1)[0]
 
 			safe_name = raw.decode("shift_jis", errors="replace")
+			print("YMXEN_SkinModel: Added bone %s" % safe_name)
 
 			bpy_bone = self.armature.data.edit_bones.new(safe_name)
 
@@ -74,7 +232,10 @@ class YMXEN_SkinModel:
 			local = Matrix.LocRotScale(positions, rotations, None)
 
 			if parent == NULL:
-				self.world[i] = YMXEN_SkinModel.AXIS_FIX @ local
+				if not self.use_tangents:
+					self.world[i] = YMXEN_SkinModel.AXIS_FIX @ local
+				else:
+					self.world[i] = local
 			else:
 				self.world[i] = self.world[parent] @ local
 
@@ -120,8 +281,19 @@ class YMXEN_SkinModel:
 			START = i * 32
 			got = body[START : START + 32]
 
-			name = got[:16].tobytes().split(b"\x00")[0].decode("shift_jis")
-			ext = got[16:20].tobytes().split(b"\x00")[0].decode("shift_jis")
+			name = (
+				got[:16]
+				.tobytes()
+				.split(b"\x00")[0]
+				.decode("shift_jis", errors="replace")
+			)
+			ext = (
+				got[16:20]
+				.tobytes()
+				.split(b"\x00")[0]
+				.decode("shift_jis", errors="replace")
+			)
+			print("YMXEN_SkinModel: Added texture %s" % name)
 			size, offset = unpack_from("<2I", got, 20)
 
 			if ext != "dds":
@@ -141,7 +313,13 @@ class YMXEN_SkinModel:
 		self.cols: list[bpy.types.Collection] = []
 		for i in range(obj_g_count):
 			o = object_groups[i * 32 : (i * 32) + 32].cast("c")
-			name = o[:16].tobytes().split(b"\x00", 1)[0].decode("shift_jis")
+			name = (
+				o[:16]
+				.tobytes()
+				.split(b"\x00", 1)[0]
+				.decode("shift_jis", errors="replace")
+			)
+			print("YMXEN_SkinModel: Added collection %s" % name)
 			collect = bpy.data.collections.new(name)
 			bpy.context.scene.collection.children.link(collect)
 			self.cols.append(collect)
@@ -245,7 +423,6 @@ class YMXEN_SkinModel:
 					group = bpy_obj.vertex_groups.get(bone_name)
 					if group:
 						group.add([v_idx], w / total, "REPLACE")
-
 			faces = self.send_faces(batch, bpy_obj)
 			bpy_obj.data.from_pydata(XYZS, [], faces)
 			bpy_obj.data.normals_split_custom_set_from_vertices(NORMALS)
@@ -269,9 +446,10 @@ class YMXEN_SkinModel:
 				g = (d >> 8) & 0xFF
 				b = d & 0xFF
 				col.data[i].color = (r, g, b, a)
-			mesh.calc_tangents(uvmap="TEXCOORD0")
+			if uv_layer:
+				mesh.calc_tangents(uvmap="TEXCOORD0")
 			self.set_shader(
-				shader_name.split(b"\x00")[0].decode("shift_jis"),
+				shader_name.split(b"\x00")[0].decode("shift_jis", errors="replace"),
 				effect_technique_index,
 				material,
 				material_count,
@@ -286,13 +464,30 @@ class YMXEN_SkinModel:
 		material_count: int,
 		subobj: bpy.types.Object,
 	):
-		mat = bpy.data.materials.new(name=name)
+		mat = bpy.data.materials.new(name=f"{self.uid}_{name}")
+		print(f"created material: {mat.name}")
 		nodes = mat.node_tree.nodes
 		links = mat.node_tree.links
 		nodes.clear()
+
 		out = nodes.new("ShaderNodeOutputMaterial")
 		bsdf = nodes.new("ShaderNodeBsdfPrincipled")
 		links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+		base_col = nodes.new("ShaderNodeRGB")
+		base_col.outputs["Color"].default_value = (1, 1, 1, 1)
+		diffuse_source = base_col.outputs["Color"]
+		ao_level = 1.0
+		ao_with_diffuse = 1.0
+		# create once per material
+		texcoord = nodes.new("ShaderNodeTexCoord")
+		mapping = nodes.new("ShaderNodeMapping")
+		links.new(texcoord.outputs["UV"], mapping.inputs["Vector"])
+		# helper to attach mapping to any image texture node
+		def hook_mapping(img_tex_node):
+			links.new(mapping.outputs["Vector"], img_tex_node.inputs["Vector"])
+
+		print("YMXEN_SkinModel: Added shader %s" % name)
 		for i in range(material_count):
 			START = i * 4
 			END = (i * 4) + 4
@@ -302,7 +497,7 @@ class YMXEN_SkinModel:
 			MAT_name = (
 				unpack_from("16s", material_view, 0)[0]
 				.split(b"\x00")[0]
-				.decode("shift_jis")
+				.decode("shift_jis", errors="replace")
 			)
 			mat_type, mat_size = unpack_from(">2H", material_view, 16)
 			match mat_type:
@@ -321,45 +516,61 @@ class YMXEN_SkinModel:
 
 				case 15:
 					data = unpack_from(">I", material_view, 20)
-
+			print("YMXEN_SkinModel: Added material %s" % MAT_name)
 			match MAT_name:
+				case "g_f4LightVec3":
+					pass
+				case "g_f4Diffuse3":
+					pass
+				case 'g_bDifLightSpc3':
+					pass
 				case "g_f4MatAmbCol":
 					pass
 				case "g_f4MatDifCol":
 					r, g, b, a = data
-					bsdf.inputs["Base Color"].default_value = (r, g, b, a)
+					base_col.outputs["Color"].default_value = (r, g, b, a)
+
 				case "g_f4SpecularCol":
 					r, g, b, a = data
-					bsdf.inputs["Specular Tint"].default_value = (r, g, b, 1.0)
+					bsdf.inputs["Specular Tint"].default_value = (r, g, b, a)
 
 				case "g_fSpecularLev":
 					(v,) = unpack_from(">f", material_view, 20)
 					bsdf.inputs["Specular IOR Level"].default_value = v
 
 				case "g_iSpecularPow":
-					(p,) = unpack_from(">I", material_view, 20)
+					(p,) = unpack_from(">i", material_view, 20)
 					bsdf.inputs["Roughness"].default_value = max(
 						0.0, min(1.0, 1.0 - (p / 128.0))
 					)
 
 				case "g_fHDRAlpha":
-					pass
+					(ha,) = unpack_from(">f", material_view, 20)
+					bsdf.inputs["Emission Strength"].default_value = 1.0 - ha
 				case "g_bUseRefRegMap":
-					pass
+					mat["g_bUseRefRegMap"] = bool(data[0])
+
 				case "g_bReflectAdd":
-					pass
+					mat["g_bReflectAdd"] = bool(data[0])
 				case "g_fReflectAlpha":
-					pass
+					mat["g_fReflectAlpha"] = float(data[0])
 				case "g_fSweatLev":
-					pass
-				case "texDiffuse":
+					(sweat,) = unpack_from(">f", material_view, 20)
+					sweat = max(0.0, sweat)
+					bsdf.inputs["Coat Weight"].default_value = _clamp(sweat, 0.0, 1.0)
+					bsdf.inputs["Coat Roughness"].default_value = 0.1
+
+				case "texDiffuse" | "g_mDiffusePrm":
 					tex_idx = data[0]
 					img = self.get_texture(tex_idx)
 					if img:
 						tex = nodes.new("ShaderNodeTexImage")
 						tex.image = img
-						tex.interpolation = "Linear"
-						links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+
+						tex.interpolation = "Cubic"
+						diffuse_source = tex.outputs["Color"]
+					else:
+						diffuse_source = base_col.outputs["Color"]
 
 				case "texSpecularMap":
 					tex_idx = data[0]
@@ -373,12 +584,13 @@ class YMXEN_SkinModel:
 						links.new(tex.outputs["Color"], inv.inputs["Color"])
 						links.new(inv.outputs["Color"], bsdf.inputs["Roughness"])
 
-				case "texNormal":
+				case "texNormal" | "g_mNormalFxPrm":
 					tex_idx = data[0]
 					img = self.get_texture(tex_idx)
 					if img:
 						tex = nodes.new("ShaderNodeTexImage")
 						tex.image = img
+
 						tex.image.colorspace_settings.name = "Non-Color"
 
 						nrm = nodes.new("ShaderNodeNormalMap")
@@ -389,8 +601,94 @@ class YMXEN_SkinModel:
 					pass
 				case "texRefctionReg":
 					pass
+				case "g_fAmbOccLev":
+					(ao_level,) = data
+				case "g_fAmbOccDif":
+					(ao_with_diffuse,) = data
+
+				# case "g_fScrollU":
+				# 	(uv_scroll[1]["u"],) = data
+				# case "g_fScrollV":
+				# 	(uv_scroll[1]["v"],) = data
+
+				# case "g_fScrollU2":
+				# 	(uv_scroll[2]["u"],) = data
+				# case "g_fScrollV2":
+				# 	(uv_scroll[2]["v"],) = data
+
+				# case "g_fScrollU3":
+				# 	(uv_scroll[3]["u"],) = data
+				# case "g_fScrollV3":
+				# 	(uv_scroll[3]["v"],) = data
+
+				# case "g_fScrollU4":
+				# 	(uv_scroll[4]["u"],) = data
+				# case "g_fScrollV4":
+				# 	(uv_scroll[4]["v"],) = data
+
+				# case "g_fSL_Scale":
+				# 	(sl_scale,) = data
+
+				# case "texUVScroll2":
+				# 	tex_idx = data[0]
+				# 	img = self.get_texture(tex_idx)
+				# 	if img:
+				# 		tex = nodes.new("ShaderNodeTexImage")
+				# 		tex.image = img
+				# 		tex_uv_scrolls[1] = tex
+
+				# 		tex.interpolation = "Cubic"
+				# case "texUVScroll3":
+				# 	tex_idx = data[0]
+				# 	img = self.get_texture(tex_idx)
+				# 	if img:
+				# 		tex = nodes.new("ShaderNodeTexImage")
+				# 		tex.image = img
+				# 		tex_uv_scrolls[2] = tex
+
+				# 		tex.interpolation = "Cubic"
+				# case "texUVScroll4":
+				# 	tex_idx = data[0]
+				# 	img = self.get_texture(tex_idx)
+				# 	if img:
+				# 		tex = nodes.new("ShaderNodeTexImage")
+				# 		tex.image = img
+				# 		tex_uv_scrolls[3] = tex
+
+				# 		tex.interpolation = "Cubic"
+
+
+				case "texOcclusion":
+					tex_idx = data[0]
+					img = self.get_texture(tex_idx)
+					if not img:
+						continue
+
+					ao_strength = max(0.0, min(1.0, ao_level * ao_with_diffuse))
+
+					# AO texture (linear data)
+					ao_tex = nodes.new("ShaderNodeTexImage")
+					ao_tex.image = img
+					ao_tex.image.colorspace_settings.name = "Non-Color"
+
+					# Convert AO RGB → scalar
+					ao_bw = nodes.new("ShaderNodeRGBToBW")
+
+					# Multiply scalar AO into diffuse
+					mul = nodes.new("ShaderNodeMixRGB")
+					mul.blend_type = "MULTIPLY"
+					mul.inputs["Fac"].default_value = ao_strength
+
+					links.new(ao_tex.outputs["Color"], ao_bw.inputs["Color"])
+					links.new(diffuse_source, mul.inputs[1])
+					links.new(ao_bw.outputs["Val"], mul.inputs[2])
+
+					diffuse_source = mul.outputs["Color"]
+
+
 				case _:
 					pass
+		links.new(diffuse_source, bsdf.inputs["Base Color"])
 		subobj.data.materials.append(mat)
 
 	def send_TEXCOORD(self, uv: memoryview, vertex: int):
@@ -442,7 +740,6 @@ class YMXEN_SkinModel:
 				# DX9 (LH, CW) → Blender (RH, CCW)
 				faces.append((tri[0], tri[2], tri[1]))
 
-
 		mesh = subobj.data
 		return faces
 
@@ -486,7 +783,11 @@ class YMXEN_SkinModel:
 
 		for i in range(count):
 			entry = textures[i * 16 : (i + 1) * 16]
-			name = unpack("16s", entry)[0].split(b"\x00", 1)[0].decode("shift_jis")
+			name = (
+				unpack("16s", entry)[0]
+				.split(b"\x00", 1)[0]
+				.decode("shift_jis", errors="replace")
+			)
 			self.texture_slots.append(None)
 			self.texture_names.append(name.lower())
 
@@ -501,8 +802,18 @@ class YMXEN_SkinModel:
 			for i in range(count):
 				entry = body[i * 32 : (i + 1) * 32]
 
-				name = entry[:16].tobytes().split(b"\x00")[0].decode("shift_jis")
-				ext = entry[16:20].tobytes().split(b"\x00")[0].decode("shift_jis")
+				name = (
+					entry[:16]
+					.tobytes()
+					.split(b"\x00")[0]
+					.decode("shift_jis", errors="replace")
+				)
+				ext = (
+					entry[16:20]
+					.tobytes()
+					.split(b"\x00")[0]
+					.decode("shift_jis", errors="replace")
+				)
 				if ext != "dds":
 					continue
 
@@ -511,15 +822,15 @@ class YMXEN_SkinModel:
 
 				key = name.lower()
 				if key not in self.loaded_textures:
-					self.loaded_textures[key] = load_dds_from_memory(name, data)
+					self.loaded_textures[key] = load_dds_from_memory(
+						name, data, self.uid
+					)
 
 	def resolve_texture_slots(self):
 		for i, name in enumerate(self.texture_names):
 			img = self.loaded_textures.get(name)
 			if img:
 				self.texture_slots[i] = img
-			else:
-				self.texture_slots[i] = None
 
 	def send_fvf(self, count: int, vertices: memoryview, subobj: bpy.types.Object):
 		packet = unpack(">I", vertices[:4])[0]
@@ -541,6 +852,7 @@ class YMXEN_SkinModel:
 		# Create colour attribute
 
 	def match_bones(self, config_name: str):
+
 		matches = []
 		for bone in self.armature.pose.bones:
 			if bone.name == config_name or bone.name.endswith(f"_{config_name}"):
@@ -550,39 +862,26 @@ class YMXEN_SkinModel:
 	def apply_muscle_spring(self, bone: bpy.types.PoseBone, values: tuple[float, ...]):
 		viscosity, gravity, spring_k, damping, time, lx, ly, lz = values
 
-		# Store original values for debugging
-		bone["ymxen_viscosity"] = viscosity
-		bone["ymxen_spring"] = spring_k
-		bone["ymxen_damping"] = damping
-		bone["ymxen_time"] = time
+		# Store params
+		bone["ymxen_viscosity"] = float(viscosity)
+		bone["ymxen_gravity"] = float(gravity)
+		bone["ymxen_spring_k"] = float(spring_k)
+		bone["ymxen_damping"] = float(damping)
+		bone["ymxen_time"] = float(time)
+		bone["ymxen_lx"] = float(lx)
+		bone["ymxen_ly"] = float(ly)
+		bone["ymxen_lz"] = float(lz)
 
-		# 1. Limit Rotation
-		limit = bone.constraints.new("LIMIT_ROTATION")
-		limit.owner_space = "LOCAL"
-		limit.use_limit_x = lx > 0.0
-		limit.use_limit_y = ly > 0.0
-		limit.use_limit_z = lz > 0.0
-		limit.min_x = -lx
-		limit.max_x = lx
-		limit.min_y = -ly
-		limit.max_y = ly
-		limit.min_z = -lz
-		limit.max_z = lz
+		# State (angular velocity in local/basis space)
+		bone["ymxen_omega"] = [0.0, 0.0, 0.0]
 
-		# 2. Copy Rotation (spring effect)
-		copy = bone.constraints.new("COPY_ROTATION")
-		copy.target = self.armature
-		copy.subtarget = bone.parent.name if bone.parent else ""
-		copy.owner_space = "LOCAL"
-		copy.target_space = "LOCAL"
-		copy.influence = min(1.0, spring_k)
+		# Make sure we have a stable rotation representation
+		bone.rotation_mode = "QUATERNION"
 
-		# 3. Damped Track (damping / lag)
-		damp = bone.constraints.new("DAMPED_TRACK")
-		damp.target = self.armature
-		damp.subtarget = bone.parent.name if bone.parent else ""
-		damp.track_axis = "TRACK_Y"
-		damp.influence = max(0.0, min(1.0, 1.0 - damping))
+		# Nuke the “pretend physics” constraints if they exist
+		for c in list(bone.constraints):
+			if c.type in {"COPY_ROTATION", "DAMPED_TRACK"}:
+				bone.constraints.remove(c)
 
 	def apply_muscle_config(self, cfg_path: str):
 		bones_cfg = self.read_muscle_springs(cfg_path)
