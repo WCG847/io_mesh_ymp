@@ -21,7 +21,7 @@ class YMXEN:
 	def write(self):
 		self.write_armature()
 		for col in self.collections:
-			self.write_collections(col, len(col.objects)) # only used as a editor side metadata so count doesnt matter
+			self.write_collections(col, len(col.objects)) # only used as a editor side metadata so we dont need to filter meshes
 
 	def write_collections(self, col: bpy.types.Collection, count: int): ...
 	def write_armature(self):
