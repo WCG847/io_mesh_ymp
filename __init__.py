@@ -22,7 +22,9 @@ import os
 
 from .src.ps2.Import.skinmodel import SkinModel
 from .src.XBOX.Import.skinmodel_ymxen import YMXEN_SkinModel, install_ymxen_springs, load_dds_from_memory
-
+from .src.globals.camera import Camera
+from .src.globals.light import Light
+from .src.XBOX.Export.ymxen import YMXEN
 
 class IMPORT_YMP_PS2(Operator, ImportHelper):
 	bl_idname = "import_scene.ymp_model_ps2"
@@ -63,10 +65,10 @@ class IMPORT_YMP_PS2(Operator, ImportHelper):
 
 
 class YMP_PreviewProps(bpy.types.PropertyGroup):
-    preview_image: bpy.props.PointerProperty(
-        name="SuperStar Preview",
-        type=bpy.types.Image
-    )
+	preview_image: bpy.props.PointerProperty(
+		name="SuperStar Preview",
+		type=bpy.types.Image
+	)
 
 
 class IMPORT_YMP_XBOX(Operator, ImportHelper):
@@ -95,7 +97,6 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 		tex_filepacks = []
 		bane_files = []
 		abd_files = []
-
 		for name in os.listdir(tex_dir):
 			lname = name.lower()
 			path = os.path.join(tex_dir, name)
@@ -112,6 +113,8 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 			elif lname.startswith('superstarface'):
 				img = bpy.data.images.load(path, check_existing=True)
 				context.scene.preview_props.preview_image = img
+			elif lname == 'camera.txt':
+				Camera(path)
 
 		tex_filepacks = tuple(tex_filepacks)
 		# in IMPORT_YMP_XBOX.execute, after tex_filepacks = tuple(tex_filepacks)
@@ -165,10 +168,28 @@ class IMPORT_YMP_XBOX(Operator, ImportHelper):
 
 		bpy.ops.object.mode_set(mode="OBJECT")
 		install_ymxen_springs()
-
 		return {"FINISHED"}
 
 
+class EXPORT_YMP_XBOX(Operator, ExportHelper):
+	bl_idname = "export_scene.ymp_model_xbox"
+	bl_label = "export YMP"
+	filename_ext = ".ymxen"
+	def execute(self, context):
+		col = list(bpy.data.collections)
+		arm = None
+		for obj in bpy.context.scene.collection.objects:
+			if obj.type == 'ARMATURE':
+				arm = obj
+				break
+		assert arm
+		textures = list(bpy.data.images)
+		handler = YMXEN(col, arm, textures)
+		handler.write()
+		with open(self.filepath, 'wb') as ymp:
+			for f in handler.structs:
+				ymp.write(f.getvalue())
+		return {'FINISHED'}
 
 class IMPORT_MT_ymp(bpy.types.Menu):
 	bl_label = "Yuke's Model Properties"
@@ -181,52 +202,68 @@ class IMPORT_MT_ymp(bpy.types.Menu):
 		layout.operator("import_scene.ymp_model_xbox", text="XBOX (.YMXEN, .JBOY)")
 
 
+class EXPORT_MT_ymp(bpy.types.Menu):
+	bl_label = "Yuke's Model Properties"
+
+	def draw(self, context):
+		layout = self.layout
+		layout.operator("export_scene.ymp_model_xbox", text="XBOX")
+
+
 
 class VIEW3D_PT_preview_panel(bpy.types.Panel):
-    bl_label = "SuperStar Images"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Preview"
+	bl_label = "SuperStar Images"
+	bl_space_type = 'VIEW_3D'
+	bl_region_type = 'UI'
+	bl_category = "Preview"
 
-    def draw(self, context):
-        layout = self.layout
-        props = context.scene.preview_props
+	def draw(self, context):
+		layout = self.layout
+		props = context.scene.preview_props
 
-        layout.template_ID_preview(
-            props,
-            "preview_image",
-            new="image.new",
-            open="image.open"
-        )
+		layout.template_ID_preview(
+			props,
+			"preview_image",
+			new="image.new",
+			open="image.open"
+		)
 
 def menu_func_import(self, context):
 	self.layout.menu("IMPORT_MT_ymp", text="Yuke's Models")
 
 
+def menu_func_export(self, context):
+	self.layout.menu("EXPORT_MT_ymp", text="Yuke's Models")
+
 def register():
-    bpy.utils.register_class(YMP_PreviewProps)
-    bpy.utils.register_class(VIEW3D_PT_preview_panel)
+	bpy.utils.register_class(YMP_PreviewProps)
+	bpy.utils.register_class(VIEW3D_PT_preview_panel)
 
-    bpy.types.Scene.preview_props = bpy.props.PointerProperty(
-        type=YMP_PreviewProps
-    )
+	bpy.types.Scene.preview_props = bpy.props.PointerProperty(
+		type=YMP_PreviewProps
+	)
 
-    bpy.utils.register_class(IMPORT_YMP_PS2)
-    bpy.utils.register_class(IMPORT_YMP_XBOX)
-    bpy.utils.register_class(IMPORT_MT_ymp)
-
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+	bpy.utils.register_class(IMPORT_YMP_PS2)
+	bpy.utils.register_class(IMPORT_YMP_XBOX)
+	bpy.utils.register_class(EXPORT_YMP_XBOX)
+	bpy.utils.register_class(IMPORT_MT_ymp)
+	bpy.utils.register_class(EXPORT_MT_ymp)
+	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+	bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+	bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
 
-    del bpy.types.Scene.preview_props
+	del bpy.types.Scene.preview_props
 
-    bpy.utils.unregister_class(VIEW3D_PT_preview_panel)
-    bpy.utils.unregister_class(YMP_PreviewProps)
+	bpy.utils.unregister_class(VIEW3D_PT_preview_panel)
+	bpy.utils.unregister_class(YMP_PreviewProps)
 
-    bpy.utils.unregister_class(IMPORT_YMP_PS2)
-    bpy.utils.unregister_class(IMPORT_YMP_XBOX)
-    bpy.utils.unregister_class(IMPORT_MT_ymp)
+	bpy.utils.unregister_class(IMPORT_YMP_PS2)
+	bpy.utils.unregister_class(IMPORT_YMP_XBOX)
+	bpy.utils.unregister_class(EXPORT_YMP_XBOX)
+	bpy.utils.unregister_class(IMPORT_MT_ymp)
+	bpy.utils.unregister_class(EXPORT_MT_ymp)

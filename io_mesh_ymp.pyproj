@@ -4,8 +4,7 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>08489eb4-ea03-4855-ab34-d99fa7c9b86a</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>
-    </StartupFile>
+    <StartupFile>src\XBOX\Export\chunk.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
@@ -32,10 +31,14 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src\globals\be.py" />
+    <Compile Include="src\globals\camera.py" />
+    <Compile Include="src\globals\light.py" />
     <Compile Include="src\ps2\Import\skinmodel.py" />
     <Compile Include="src\ps2\Import\__init__.py" />
     <Compile Include="src\ps2\__init__.py" />
+    <Compile Include="src\XBOX\Export\chunk.py" />
     <Compile Include="src\XBOX\Export\ymxen.py" />
+    <Compile Include="src\XBOX\Export\__init__.py" />
     <Compile Include="src\XBOX\Import\skinmodel_ymxen.py" />
     <Compile Include="src\__init__.py" />
     <Compile Include="__init__.py" />

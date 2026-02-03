@@ -1,5 +1,6 @@
 import math
 from typing import TextIO
+from bpy.types import ParticleSettingsTextureSlot
 from mathutils import Euler, Matrix, Vector, Quaternion
 from ...globals.be import get_view, resolve_view
 from struct import unpack_from, unpack
@@ -464,6 +465,20 @@ class YMXEN_SkinModel:
 		material_count: int,
 		subobj: bpy.types.Object,
 	):
+		noise_node = None
+		mask_node = None
+		fresnel_node = None
+		noise_tex = None
+		noise_mask = None
+
+		def ensure_noise():
+			nonlocal noise_node
+			if noise_node is None:
+				noise_node = nodes.new("ShaderNodeTexNoise")
+				noise_node.inputs["Scale"].default_value = 12.0
+				noise_node.inputs["Detail"].default_value = 2.0
+			return noise_node
+
 		mat = bpy.data.materials.new(name=f"{self.uid}_{name}")
 		print(f"created material: {mat.name}")
 		nodes = mat.node_tree.nodes
@@ -483,9 +498,14 @@ class YMXEN_SkinModel:
 		texcoord = nodes.new("ShaderNodeTexCoord")
 		mapping = nodes.new("ShaderNodeMapping")
 		links.new(texcoord.outputs["UV"], mapping.inputs["Vector"])
+
 		# helper to attach mapping to any image texture node
 		def hook_mapping(img_tex_node):
 			links.new(mapping.outputs["Vector"], img_tex_node.inputs["Vector"])
+
+		spec_base = 0
+		power_base = 0
+		level_base = 0
 
 		print("YMXEN_SkinModel: Added shader %s" % name)
 		for i in range(material_count):
@@ -522,7 +542,7 @@ class YMXEN_SkinModel:
 					pass
 				case "g_f4Diffuse3":
 					pass
-				case 'g_bDifLightSpc3':
+				case "g_bDifLightSpc3":
 					pass
 				case "g_f4MatAmbCol":
 					pass
@@ -534,9 +554,18 @@ class YMXEN_SkinModel:
 					r, g, b, a = data
 					bsdf.inputs["Specular Tint"].default_value = (r, g, b, a)
 
+				case 'g_fSpecLev':
+					(v,) = unpack_from(">f", material_view, 20)
+					bsdf.inputs["Specular IOR Level"].default_value = v / 10
+
 				case "g_fSpecularLev":
 					(v,) = unpack_from(">f", material_view, 20)
 					bsdf.inputs["Specular IOR Level"].default_value = v
+
+				case "g_fSpecPow":
+					(p,) = unpack_from(">f", material_view, 20)
+					bsdf.inputs["Roughness"].default_value = p / 10
+
 
 				case "g_iSpecularPow":
 					(p,) = unpack_from(">i", material_view, 20)
@@ -572,6 +601,103 @@ class YMXEN_SkinModel:
 					else:
 						diffuse_source = base_col.outputs["Color"]
 
+				case "g_mCubeLPrm":
+					tex_idx = data[0]
+					img = self.get_texture(tex_idx)
+					if img:
+						env = nodes.new("ShaderNodeTexEnvironment")
+						env.image = img
+
+						fresnel_node = nodes.new("ShaderNodeFresnel")
+						fresnel_node.inputs["IOR"].default_value = 1.45
+
+						mix = nodes.new("ShaderNodeMixRGB")
+						mix.blend_type = "MIX"
+
+						links.new(fresnel_node.outputs["Fac"], mix.inputs["Fac"])
+						links.new(env.outputs["Color"], mix.inputs[2])
+						links.new(diffuse_source, mix.inputs[1])
+
+						diffuse_source = mix.outputs["Color"]
+
+
+
+				case "g_mNoiseTilePrm":
+					tex_idx = data[0]
+					img = self.get_texture(tex_idx)
+					if img:
+						noise_tex = nodes.new("ShaderNodeTexImage")
+						noise_tex.image = img
+						noise_tex.image.colorspace_settings.name = "Non-Color"
+						noise_tex.interpolation = "Linear"
+
+
+				case "g_mMaskPrm":
+					tex_idx = data[0]
+					img = self.get_texture(tex_idx)
+					if img:
+						mask_node = nodes.new("ShaderNodeTexImage")
+						mask_node.image = img
+						mask_node.image.colorspace_settings.name = "Non-Color"
+
+				case 'g_fSSLevel':
+					level = data[0]
+					bsdf.inputs["Subsurface Weight"].default_value = level
+				case 'g_fSSStart':
+					pass
+				case 'g_fSSEnd':
+					pass
+				case 'g_f4SSColor':
+					pass
+
+				case 'g_fSpecLevBase':
+					pass
+				case 'g_fSpecPwBase':
+					pass
+				case "g_f4Ref_COL":
+					r, g, b, a = data
+					bsdf.inputs["Specular Tint"].default_value = (r, g, b, 1.0)
+
+				case "g_f4Ref_DOT":
+					pass  # handled implicitly via Fresnel
+
+				case "g_f4NoiseTDiff":
+					if noise_tex:
+						mul = nodes.new("ShaderNodeMixRGB")
+						mul.blend_type = "MULTIPLY"
+						mul.inputs["Fac"].default_value = data[3] if len(data) == 4 else 0.3
+
+						links.new(diffuse_source, mul.inputs[1])
+						links.new(noise_tex.outputs["Color"], mul.inputs[2])
+
+						if noise_mask:
+							links.new(noise_mask.outputs["Color"], mul.inputs["Fac"])
+
+						diffuse_source = mul.outputs["Color"]
+
+				case "g_f4NoiseTSpec":
+					if noise_tex:
+						ramp = nodes.new("ShaderNodeValToRGB")
+
+						links.new(noise_tex.outputs["Color"], ramp.inputs["Fac"])
+						links.new(ramp.outputs["Color"], bsdf.inputs["Roughness"])
+
+
+				case "g_f4NoiseTBump":
+					if noise_tex:
+						bump = nodes.new("ShaderNodeBump")
+						bump.inputs["Strength"].default_value = data[3] if len(data) == 4 else 0.2
+
+						links.new(noise_tex.outputs["Color"], bump.inputs["Height"])
+						links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+
+				case "g_f4NoiseTCnt":
+					if noise_tex:
+						scale = sum(data[:3]) / 3.0
+						noise_tex.extension = "REPEAT"
+
+
+
 				case "texSpecularMap":
 					tex_idx = data[0]
 					img = self.get_texture(tex_idx)
@@ -590,9 +716,7 @@ class YMXEN_SkinModel:
 					if img:
 						tex = nodes.new("ShaderNodeTexImage")
 						tex.image = img
-
 						tex.image.colorspace_settings.name = "Non-Color"
-
 						nrm = nodes.new("ShaderNodeNormalMap")
 						links.new(tex.outputs["Color"], nrm.inputs["Color"])
 						links.new(nrm.outputs["Normal"], bsdf.inputs["Normal"])
@@ -657,7 +781,6 @@ class YMXEN_SkinModel:
 
 				# 		tex.interpolation = "Cubic"
 
-
 				case "texOcclusion":
 					tex_idx = data[0]
 					img = self.get_texture(tex_idx)
@@ -684,7 +807,6 @@ class YMXEN_SkinModel:
 					links.new(ao_bw.outputs["Val"], mul.inputs[2])
 
 					diffuse_source = mul.outputs["Color"]
-
 
 				case _:
 					pass
